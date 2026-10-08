@@ -10,6 +10,7 @@ from collections.abc import Sequence as GenericSequence
 from typing import Any
 
 import msgspec
+import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -274,7 +275,14 @@ class ServingTokens(GenerateBaseServing):
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
+                    PlaceholderRange(
+                        offset=p.offset,
+                        length=p.length,
+                        is_embed=torch.tensor(p.is_embed, dtype=torch.bool)
+                        if p.is_embed is not None
+                        else None,
+                    )
+                    for p in ranges
                 ]
                 for modality, ranges in features.mm_placeholders.items()
             }

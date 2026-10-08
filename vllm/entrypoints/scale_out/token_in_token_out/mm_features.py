@@ -129,7 +129,12 @@ def placeholder_ranges_from_engine_input(
     ]
     return {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=p.is_embed.tolist() if p.is_embed is not None else None,
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }

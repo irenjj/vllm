@@ -279,3 +279,13 @@ def test_attention_diagnostics_roundtrips_through_generate_protocol():
         index=0, token_ids=[], attention_diagnostics={"error": "unsupported"}
     )
     assert choice.model_dump()["attention_diagnostics"] == {"error": "unsupported"}
+
+
+@pytest.mark.parametrize("mask", [[True], [True, 1], [False, "true"]])
+def test_placeholder_rejects_invalid_embedding_mask(mask):
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        PlaceholderRangeInfo,
+    )
+
+    with pytest.raises(ValueError):
+        PlaceholderRangeInfo(offset=0, length=2, is_embed=mask)
