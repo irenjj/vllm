@@ -247,3 +247,35 @@ def test_tokens_response_echoes_output_mode_without_text():
     ).model_dump()
     assert dumped["output_mode"] == "tokens"
     assert "text" not in dumped["choices"][0]
+
+
+def test_attention_diagnostics_roundtrips_through_generate_protocol():
+    """Nested diagnostic options must survive HTTP validation and serialization."""
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateRequest,
+        GenerateTokensChoice,
+    )
+
+    request = GenerateRequest.model_validate(
+        {
+            "token_ids": [1, 2, 3],
+            "sampling_params": {
+                "attention_diagnostics": {
+                    "query_positions": [2, 0],
+                    "layer_names": ["layer"],
+                }
+            },
+        }
+    )
+    assert request.sampling_params.attention_diagnostics.query_positions == [2, 0]
+    assert request.sampling_params.skip_reading_prefix_cache is True
+    assert request.sampling_params.detokenize is False
+    roundtrip = GenerateRequest.model_validate_json(request.model_dump_json())
+    assert (
+        roundtrip.sampling_params.attention_diagnostics
+        == request.sampling_params.attention_diagnostics
+    )
+    choice = GenerateTokensChoice(
+        index=0, token_ids=[], attention_diagnostics={"error": "unsupported"}
+    )
+    assert choice.model_dump()["attention_diagnostics"] == {"error": "unsupported"}
