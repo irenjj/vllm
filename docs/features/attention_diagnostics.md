@@ -10,7 +10,10 @@ bit-identical attention from a previous decode run.
 
 Use this checkout with `VLLM_USE_V2_MODEL_RUNNER=1`, `--enforce-eager`, and
 `--no-async-scheduling`. The first implementation supports standard causal
-MHA/GQA attention and tensor parallel head gathering. Set PP/DP/DCP/PCP to 1.
+MHA/GQA attention and tensor parallel head gathering. Set PP/DCP/PCP to 1.
+Non-MoE models support DP replicas: each request is routed to one independent
+engine, and attention heads are gathered only within that engine's TP group.
+MoE DP is rejected because its cross-replica execution requires separate validation.
 Speculative decoding, microbatching/DBO, expert parallelism, auxiliary output, cache transfer,
 quantized KV, fast KV sharing, encoder-decoder and diffusion models are rejected.
 
@@ -21,7 +24,7 @@ Selecting a linear-attention or MLA layer returns an explicit capture error.
 A hybrid model can expose its standard full-attention layers; this does not
 visualize its recurrent/linear layers.
 
-A diagnostic request runs exclusively on its engine: existing generation work
+A diagnostic request runs exclusively on its selected engine (not all DP replicas): existing generation work
 finishes before it is admitted, and subsequent requests wait. This avoids mixing
 prefill-only completion and normal sampling. Large diagnostics therefore affect
 serving latency. Prefix-cache reads and writes are disabled for the diagnostic request so
