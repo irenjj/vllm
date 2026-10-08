@@ -1494,3 +1494,39 @@ async def test_stream_text_mode_usage_chunk_echoes_output_mode():
     assert usage_chunk["output_mode"] == "text"
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["completion_tokens"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_attention_diagnostics_has_zero_completion_usage_and_no_stream(stream):
+    from vllm.attention_diagnostics import AttentionDiagnosticsParams
+
+    engine = _mock_engine()
+    payload = {"query_positions": [0, 2], "sequence_length": 3, "layers": {}}
+
+    async def mock_generate(*args, **kwargs):
+        result = _make_request_output(
+            "diagnostic", token_ids=[], finish_reason="stop", finished=True
+        )
+        result.outputs[0].attention_diagnostics = payload
+        yield result
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        model=MODEL_NAME,
+        stream=stream,
+        sampling_params=SamplingParams(
+            attention_diagnostics=AttentionDiagnosticsParams([0, 2], ["layer"])
+        ),
+    )
+    response = await serving.serve_tokens(request)
+    if stream:
+        assert isinstance(response, ErrorResponse)
+        engine.generate.assert_not_called()
+    else:
+        assert isinstance(response, GenerateTokensResponse)
+        assert response.choices[0].token_ids == []
+        assert response.choices[0].attention_diagnostics == payload
+        assert response.usage.completion_tokens == 0

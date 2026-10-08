@@ -396,6 +396,8 @@ class GenerateLogProbs(BaseModel):
 class GenerateChoiceBase(BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
 
+    attention_diagnostics: dict[str, Any] | None = None
+
     index: int
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"

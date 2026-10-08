@@ -280,3 +280,22 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"n": 2},
+        {"min_tokens": 1},
+        {"logprobs": 0},
+        {"prompt_logprobs": 1},
+        {"trace_decode_token_ids": [1]},
+    ],
+)
+def test_attention_diagnostics_rejects_generation_only_options(kwargs):
+    from vllm.attention_diagnostics import AttentionDiagnosticsParams
+
+    with pytest.raises(ValueError, match="Attention diagnostics require"):
+        SamplingParams(
+            attention_diagnostics=AttentionDiagnosticsParams([0], ["layer"]), **kwargs
+        )

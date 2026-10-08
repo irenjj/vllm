@@ -77,6 +77,8 @@ class CompletionOutput:
     sampling_mask: SamplingMask | None = None
     spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
+    attention_diagnostics: dict | None = None
+
     def finished(self) -> bool:
         return self.finish_reason is not None
 
@@ -219,6 +221,10 @@ class RequestOutput:
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
+                        if next_completion.attention_diagnostics is not None:
+                            completion.attention_diagnostics = (
+                                next_completion.attention_diagnostics
+                            )
                         # R3 is returned on the terminal output and must survive
                         # aggregation with earlier chunks that have no R3.
                         if next_completion.routed_experts is not None:

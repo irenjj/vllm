@@ -359,6 +359,13 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
 
         """
+        # A replay can stop before later layers have populated their cache.
+        # Guard the shared publication point, including delayed/hybrid caching.
+        if (
+            request.sampling_params is not None
+            and request.sampling_params.attention_diagnostics is not None
+        ):
+            return
         boundaries = self.get_replay_boundaries(request)
         for group_id, manager in enumerate(self.single_type_managers):
             if not manager.enable_caching:

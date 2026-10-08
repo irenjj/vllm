@@ -7454,3 +7454,40 @@ def test_diffusion_read_deferral_keeps_a_longer_pp_wait():
     # Deferring this step alone would ask for 6. The PP wait to 7 stands.
     assert "read" not in scheduler.schedule().num_scheduled_tokens
     assert read.next_decode_eligible_step == 7
+
+
+def test_attention_diagnostics_prefill_only_and_exclusive():
+    """Ordinary requests wait; chunked diagnostics finish with zero output IDs."""
+    from vllm.attention_diagnostics import AttentionDiagnosticsParams
+
+    scheduler = create_scheduler(
+        max_num_seqs=2, max_num_batched_tokens=4, max_model_len=16
+    )
+    diagnostic, ordinary = create_requests(num_requests=2, num_tokens=8)
+    diagnostic.sampling_params = SamplingParams(
+        attention_diagnostics=AttentionDiagnosticsParams([0, 7], ["layer"])
+    )
+    diagnostic.skip_reading_prefix_cache = True
+    scheduler.add_request(diagnostic)
+    scheduler.add_request(ordinary)
+    for step in range(2):
+        scheduled = scheduler.schedule()
+        assert scheduled.num_scheduled_tokens == {diagnostic.request_id: 4}
+        payload = {"sequence_length": 8, "layers": {}} if step == 1 else None
+        output = ModelRunnerOutput(
+            req_ids=[diagnostic.request_id],
+            req_id_to_index={diagnostic.request_id: 0},
+            sampled_token_ids=[[]],
+            attention_diagnostics=({diagnostic.request_id: payload} if payload else {}),
+        )
+        results = scheduler.update_from_output(scheduled, output)
+        assert diagnostic.num_output_tokens == 0
+        if step == 0:
+            assert not diagnostic.is_finished()
+        else:
+            assert diagnostic.is_finished()
+            emitted = results[diagnostic.client_index].outputs[0]
+            assert emitted.new_token_ids == []
+            assert emitted.attention_diagnostics == payload
+            assert emitted.finish_reason == FinishReason.STOP
+    assert ordinary.request_id in scheduler.schedule().num_scheduled_tokens

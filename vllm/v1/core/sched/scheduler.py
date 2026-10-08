@@ -707,7 +707,12 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens,
                 self.max_model_len
                 - request.num_computed_tokens
-                - self.num_sampled_tokens_per_step,
+                - (
+                    0
+                    if request.sampling_params is not None
+                    and request.sampling_params.attention_diagnostics is not None
+                    else self.num_sampled_tokens_per_step
+                ),
             )
 
             # Apply Mamba alignment before encoder caps.
@@ -912,6 +917,19 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                diagnostic = bool(
+                    request.sampling_params
+                    and request.sampling_params.attention_diagnostics
+                )
+                if self.running and (
+                    diagnostic
+                    or any(
+                        r.sampling_params and r.sampling_params.attention_diagnostics
+                        for r in self.running
+                    )
+                ):
+                    break
 
                 ready_to_schedule = self._handle_blocked_waiting_request(request)
                 if not ready_to_schedule:
@@ -1495,6 +1513,16 @@ class Scheduler(SchedulerInterface):
                 scheduled_encoder_inputs
             )
 
+        attention_diagnostics = {}
+        for req_id in num_scheduled_tokens:
+            request = self.requests[req_id]
+            params = request.sampling_params
+            if params is not None and params.attention_diagnostics is not None:
+                attention_diagnostics[req_id] = (
+                    params.attention_diagnostics,
+                    request.num_prompt_tokens,
+                )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1515,6 +1543,7 @@ class Scheduler(SchedulerInterface):
             has_sync_kv_loads=has_sync_kv_loads,
             kv_cache_block_copies=pending_kv_cache_block_copies,
             kv_connector_block_state=kv_connector_block_state,
+            attention_diagnostics=attention_diagnostics,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
@@ -2159,6 +2188,18 @@ class Scheduler(SchedulerInterface):
             prefill_stats = None
             status_before_stop = request.status
 
+            attention_diagnostics = model_runner_output.attention_diagnostics.get(
+                req_id
+            )
+            # A prefill-only request completes without appending an output token.
+            if (
+                request.sampling_params is not None
+                and request.sampling_params.attention_diagnostics is not None
+                and attention_diagnostics is not None
+            ):
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -2267,6 +2308,7 @@ class Scheduler(SchedulerInterface):
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         prompt_token_id_logprobs=prompt_token_id_logprobs,
                         pooling_output=pooler_output,
+                        attention_diagnostics=attention_diagnostics,
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         prefill_stats=prefill_stats,
