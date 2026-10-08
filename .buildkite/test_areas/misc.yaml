@@ -548,8 +548,6 @@ steps:
   - tests/test_ray_env_utils.py
   - tests/test_request_input_bounds.py
   - tests/test_sampling_params.py
-  - tests/attention_diagnostics/
-  - vllm/attention_diagnostics.py
   - tests/test_scalartype.py
   - tests/test_tensorizer_revision_pin.py
   - tests/test_triton_utils.py
@@ -593,7 +591,6 @@ steps:
   - pytest -v -s test_ray_env_utils.py
   - pytest -v -s test_request_input_bounds.py
   - pytest -v -s test_sampling_params.py
-  - pytest -v -s attention_diagnostics
   - pytest -v -s test_scalartype.py
   - pytest -v -s test_tensorizer_revision_pin.py
   - pytest -v -s test_triton_utils.py

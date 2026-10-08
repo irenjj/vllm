@@ -16,7 +16,6 @@ from pydantic import BeforeValidator, GetPydanticSchema, StrictInt
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.attention_diagnostics import AttentionDiagnosticsParams
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -421,8 +420,6 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
-    attention_diagnostics: AttentionDiagnosticsParams | None = None
-
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
@@ -632,22 +629,6 @@ class SamplingParams(
             )
 
     def _verify_args(self) -> None:
-        if self.attention_diagnostics is not None:
-            self.attention_diagnostics.validate()
-            if (
-                self.n != 1
-                or self.min_tokens
-                or self.logprobs is not None
-                or self.prompt_logprobs is not None
-                or self.prompt_logprob_token_ids is not None
-                or self.structured_outputs is not None
-                or self.trace_decode_token_ids is not None
-            ):
-                raise ValueError(
-                    "Attention diagnostics require n=1 and no generation-only options"
-                )
-            self.skip_reading_prefix_cache = True
-            self.detokenize = False
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()

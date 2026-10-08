@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.attention_diagnostics import AttentionDiagnosticsParams
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
 
@@ -314,11 +313,6 @@ class SchedulerOutput:
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
-
-    # A diagnostic batch is exclusive and contains no decode work.
-    attention_diagnostics: dict[str, tuple[AttentionDiagnosticsParams, int]] = field(
-        default_factory=dict
-    )
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

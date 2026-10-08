@@ -189,7 +189,6 @@ class RequestState:
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
-        self.attention_diagnostics: dict | None = None
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
 
         # Stream Interval
@@ -466,7 +465,6 @@ class RequestState:
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
-            attention_diagnostics=self.attention_diagnostics,
             sampling_mask=sampling_mask,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
@@ -696,10 +694,6 @@ class OutputProcessor:
                 req_state, engine_core_output, engine_core_timestamp, iteration_stats
             )
 
-            if engine_core_output.attention_diagnostics is not None:
-                req_state.attention_diagnostics = (
-                    engine_core_output.attention_diagnostics
-                )
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
