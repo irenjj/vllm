@@ -159,7 +159,10 @@ class InputProcessor:
                     or parallel.pipeline_parallel_size != 1
                     or parallel.decode_context_parallel_size != 1
                     or parallel.prefill_context_parallel_size != 1
-                    or parallel.enable_expert_parallel
+                    or (
+                        parallel.enable_expert_parallel
+                        and parallel.data_parallel_size != 1
+                    )
                     or (parallel.data_parallel_size > 1 and config.model_config.is_moe)
                     or parallel.use_ubatching
                     or config.model_config.is_encoder_decoder
@@ -172,7 +175,8 @@ class InputProcessor:
                     raise ValueError(
                         "Attention diagnostics require eager MRV2, "
                         "synchronous scheduling, "
-                        "PP/DCP/PCP=1, no MoE DP, EP, microbatching, speculation, "
+                        "PP/DCP/PCP=1, no MoE DP, multi-DP EP, "
+                        "microbatching, speculation, "
                         "encoder-decoder/diffusion models, "
                         "auxiliary output, fast KV sharing or cache transfer"
                     )

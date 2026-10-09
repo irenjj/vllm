@@ -503,7 +503,12 @@ class Qwen4ExpModel(nn.Module):
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
             last_layer = layer
-            if layer_idx + 1 < self.end_layer:
+            stop_for_diagnostics = False
+            if not torch.compiler.is_compiling():
+                from vllm.attention_diagnostics import diagnostics_should_stop
+
+                stop_for_diagnostics = diagnostics_should_stop(self.layers, layer_idx)
+            if layer_idx + 1 < self.end_layer and not stop_for_diagnostics:
                 self._start_layer_ple_prefetch(
                     self.layers[layer_idx + 1],
                     hidden_states,
@@ -543,6 +548,9 @@ class Qwen4ExpModel(nn.Module):
                 block_output = None
                 injection = None
                 hidden_states = hidden_states + deepstack_embed
+
+            if stop_for_diagnostics:
+                return hidden_states[:, : self.config.hidden_size]
 
         if not get_pp_group().is_last_rank:
             # PP transports one tensor, not the delayed HC tuple. Materialize

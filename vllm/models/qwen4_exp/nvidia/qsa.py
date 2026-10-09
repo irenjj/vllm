@@ -312,6 +312,10 @@ class Qwen4ExpQSAFlashAttentionImpl(FlashAttentionImpl):
                 "Qwen4Exp QSA requires BF16 Q and BF16 or FP8-e4m3 K/V"
             )
 
+        from vllm.attention_diagnostics import capture_qsa
+
+        capture_qsa(layer, query, key_cache, logical_indices, attn_metadata.block_table)
+
         from .ops.qsa import qsa_sparse_paged_attention
 
         qsa_sparse_paged_attention(

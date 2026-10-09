@@ -118,10 +118,51 @@ class _LayerCapture:
 
 
 @dataclass
+class _SparseCapture:
+    weights: torch.Tensor
+    queries_seen: torch.Tensor
+    selected_positions: list[list[int]]
+    device: torch.device
+
+
+def sparse_attention_row(query, key_cache, packed, block_table, columns):
+    """Read the actual QSA selection and paged keys, before the output gate."""
+    count = int(packed[-1])
+    if not 0 < count < len(packed):
+        raise ValueError("Invalid QSA selection count")
+    indices = packed[:count].long()
+    page_size = key_cache.shape[1]
+    if (indices < 0).any() or (indices // page_size >= len(block_table)).any():
+        raise ValueError("Invalid QSA logical position")
+    pages = block_table[indices // page_size].long()
+    if (pages < 0).any() or (pages >= key_cache.shape[0]).any():
+        raise ValueError("Invalid QSA physical page")
+    keys = key_cache[pages, indices % page_size].float()
+    heads = torch.arange(query.shape[0], device=query.device)
+    heads = heads // (query.shape[0] // keys.shape[1])
+    scores = torch.einsum("hd,khd->hk", query.float(), keys[:, heads])
+    probabilities = (scores * query.shape[-1] ** -0.5).softmax(-1)
+    # Aggregate duplicate positions if a backend ever emits them.
+    result = query.new_empty((query.shape[0], len(columns)), dtype=torch.float32)
+    for start in range(0, len(columns), 256):
+        block = torch.tensor(columns[start : start + 256], device=query.device)
+        matches = indices[:, None] == block[None, :]
+        result[:, start : start + len(block)] = probabilities @ matches.float()
+    return result, indices.cpu().tolist()
+
+
+def capture_qsa(layer, query, key_cache, packed, block_table):
+    active = _active_capture.get()
+    if active is not None:
+        collector, batch = active
+        collector.capture_qsa(layer, query, key_cache, packed, block_table, batch)
+
+
+@dataclass
 class _RequestCapture:
     params: AttentionDiagnosticsParams
     length: int
-    layers: dict[str, _LayerCapture] = field(default_factory=dict)
+    layers: dict[str, _LayerCapture | _SparseCapture] = field(default_factory=dict)
     error: str | None = None
     buffer_bytes: int = 0
     early_exit_layer: int | None = None
@@ -153,8 +194,9 @@ def diagnostics_should_stop(layers: Any, layer_index: int) -> bool:
         return False
     names = {}
     for index, block in enumerate(layers):
-        attention = getattr(getattr(block, "self_attn", None), "attn", None)
-        if attention is not None:
+        owner = getattr(block, "self_attn", None)
+        attention = getattr(owner, "attn", owner)
+        if attention is not None and hasattr(attention, "layer_name"):
             names[attention.layer_name] = index
     requested = {name for s in states for name in s.params.layer_names}
     if not requested.issubset(names):
@@ -204,6 +246,61 @@ class AttentionDiagnosticsCollector:
                 continue
             try:
                 self._capture_layer(state, layer, q, k, batch, i)
+            except (ValueError, RuntimeError, MemoryError) as exc:
+                state.error = str(exc)
+                state.layers.clear()
+
+    def capture_qsa(self, layer, q, cache, packed, table, batch):
+        for i, req_id in enumerate(batch.req_ids):
+            state = self.requests.get(req_id)
+            if (
+                state is None
+                or state.error
+                or layer.layer_name not in state.params.layer_names
+            ):
+                continue
+            try:
+                params = state.params
+                columns = (
+                    params.key_positions
+                    if params.key_positions is not None
+                    else list(range(state.length))
+                )
+                entry = state.layers.get(layer.layer_name)
+                if entry is None:
+                    shape = (q.shape[1], len(params.query_positions), len(columns))
+                    values = shape[0] * shape[1] * shape[2]
+                    size = (
+                        values * 4 + len(params.query_positions) * packed.shape[1] * 8
+                    )
+                    if (
+                        values > params.max_output_values
+                        or state.buffer_bytes + size > params.max_buffer_bytes
+                    ):
+                        raise ValueError("QSA capture exceeds diagnostic budget")
+                    entry = _SparseCapture(
+                        torch.zeros(shape),
+                        torch.zeros(shape[1], dtype=torch.bool),
+                        [[] for _ in params.query_positions],
+                        q.device,
+                    )
+                    state.layers[layer.layer_name] = entry
+                    state.buffer_bytes += size
+                if not isinstance(entry, _SparseCapture):
+                    raise ValueError("Attention capture type changed during replay")
+                start, end = (int(x) for x in batch.query_start_loc_np[i : i + 2])
+                offset = int(batch.num_computed_tokens_np[i])
+                for j, position in enumerate(params.query_positions):
+                    if offset <= position < offset + end - start:
+                        row = start + position - offset
+                        weights, selected = sparse_attention_row(
+                            q[row], cache, packed[row], table[i], columns
+                        )
+                        if any(k > position for k in selected):
+                            raise ValueError("QSA selection violates causality")
+                        entry.weights[:, j] = weights.detach().cpu()
+                        entry.selected_positions[j] = selected
+                        entry.queries_seen[j] = True
             except (ValueError, RuntimeError, MemoryError) as exc:
                 state.error = str(exc)
                 state.layers.clear()
@@ -275,7 +372,7 @@ class AttentionDiagnosticsCollector:
                 entry = state.layers.get(name)
                 if (
                     entry is None
-                    or not entry.keys_seen.all()
+                    or (isinstance(entry, _LayerCapture) and not entry.keys_seen.all())
                     or not entry.queries_seen.all()
                 ):
                     error = f"Incomplete attention capture for {name}"
@@ -302,7 +399,11 @@ class AttentionDiagnosticsCollector:
         total_values = 0
         for name in params.layer_names:
             entry = state.layers[name]
-            num_heads = entry.queries.shape[0] * group.world_size
+            num_heads = (
+                entry.weights.shape[0]
+                if isinstance(entry, _SparseCapture)
+                else entry.queries.shape[0]
+            ) * group.world_size
             if (
                 params.head_indices is not None
                 and max(params.head_indices) >= num_heads
@@ -315,12 +416,16 @@ class AttentionDiagnosticsCollector:
             weights = None
             error = None
             try:
-                weights = selected_attention(
-                    entry.queries.to(entry.device),
-                    entry.keys,
-                    params.query_positions,
-                    keys,
-                    entry.scale,
+                weights = (
+                    entry.weights.to(entry.device)
+                    if isinstance(entry, _SparseCapture)
+                    else selected_attention(
+                        entry.queries.to(entry.device),
+                        entry.keys,
+                        params.query_positions,
+                        keys,
+                        entry.scale,
+                    )
                 )
                 if not torch.isfinite(weights).all():
                     error = f"Non-finite attention values for {name}"
@@ -348,4 +453,10 @@ class AttentionDiagnosticsCollector:
                 "head_indices": heads,
                 "weights": weights[heads].cpu().tolist(),
             }
+            if isinstance(entry, _SparseCapture):
+                result["layers"][name]["attention_type"] = "qsa"
+                result["layers"][name]["selected_key_positions"] = (
+                    entry.selected_positions
+                )
+                result["layers"][name]["weight_stage"] = "before_output_gate"
         return result

@@ -119,9 +119,18 @@ def test_trace_replay_requires_v2_model_runner():
 
 
 @pytest.mark.parametrize(
-    "dp_size,is_moe,rejected", [(1, False, False), (4, False, False), (4, True, True)]
+    "dp_size,is_moe,ep,rejected",
+    [
+        (1, False, False, False),
+        (4, False, False, False),
+        (4, True, False, True),
+        (1, True, True, False),
+        (4, True, True, True),
+    ],
 )
-def test_diagnostic_dp_accepts_independent_dense_replicas(dp_size, is_moe, rejected):
+def test_diagnostic_dp_accepts_independent_dense_replicas(
+    dp_size, is_moe, ep, rejected
+):
     from vllm.attention_diagnostics import AttentionDiagnosticsParams
 
     model = SimpleNamespace(
@@ -138,7 +147,7 @@ def test_diagnostic_dp_accepts_independent_dense_replicas(dp_size, is_moe, rejec
             pipeline_parallel_size=1,
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
-            enable_expert_parallel=False,
+            enable_expert_parallel=ep,
             data_parallel_size=dp_size,
             use_ubatching=False,
         ),

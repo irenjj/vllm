@@ -14,10 +14,11 @@ MHA/GQA attention and tensor parallel head gathering. Set PP/DCP/PCP to 1.
 Non-MoE models support DP replicas: each request is routed to one independent
 engine, and attention heads are gathered only within that engine's TP group.
 MoE DP is rejected because its cross-replica execution requires separate validation.
-Speculative decoding, microbatching/DBO, expert parallelism, auxiliary output, cache transfer,
+Single-DP expert parallelism is supported; all EP ranks execute the same replay.
+Speculative decoding, microbatching/DBO, auxiliary output, cache transfer,
 quantized KV, fast KV sharing, encoder-decoder and diffusion models are rejected.
 
-Selected layers must use `vllm.model_executor.layers.attention.Attention` with
+For ordinary attention, selected layers must use `vllm.model_executor.layers.attention.Attention` with
 ordinary causal semantics. Sliding-window, ALiBi, logit softcap, attention sinks,
 chunk-lookback, dual-chunk, KV-sharing and multimodal prefix attention are unsupported.
 Selecting a linear-attention or MLA layer returns an explicit capture error.
@@ -176,3 +177,22 @@ uv run --no-project .venv/bin/python -m pytest tests/v1/core/test_scheduler.py \
 Before production use, compare small eager model runs against a reference
 attention implementation, then validate TP and multimodal token/patch alignment.
 A passing numerical unit test alone does not establish model-serving parity.
+
+## Flash-Next sparse attention
+
+Qwen4Exp / Qwen3.8-Flash-Next QSA layers support the same selection API.
+Capture reads the actual indexer selection and paged BF16 keys after the cache
+write, including the fused QKV preparation path. The trailing selection count is
+metadata, not a token index. Weights are FP32 reference softmax probabilities
+normalized over the selected positions, before the attention output gate.
+Unselected returned columns are zero; column subsets are not renormalized.
+Each QSA layer also returns `attention_type: "qsa"`,
+`selected_key_positions` (one list per requested query), and
+`weight_stage: "before_output_gate"`. These are attention weights, not indexer
+ranking scores or causal attributions.
+
+Chunked prefill captures a query while its selected cache entries are live.
+Early exit stops after the deepest requested block and avoids prefetching the
+next block's N-gram embeddings. Ordinary generation retains the full decoder.
+MoE expert routing, GDN state, residual gates and N-gram lookup visualization
+are not included. MoE DP across independent engines remains unsupported.

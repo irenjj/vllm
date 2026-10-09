@@ -285,3 +285,82 @@ def test_diagnostics_never_publish_prefix_blocks():
     )
     KVCacheCoordinator.cache_blocks(coordinator, request, 32)
     coordinator.get_replay_boundaries.assert_not_called()
+
+
+def test_qsa_paged_selection_preserves_sparse_normalization():
+    """Count is not an index; unselected positions stay zero across page remaps."""
+    from vllm.attention_diagnostics import sparse_attention_row
+
+    torch.manual_seed(5)
+    q = torch.randn(4, 8)
+    cache = torch.randn(3, 2, 2, 8)
+    table = torch.tensor([2, 0, 1])
+    packed = torch.tensor([0, 3, 4, -1, 3])
+    actual, selected = sparse_attention_row(q, cache, packed, table, [4, 1, 0])
+    keys = torch.stack([cache[2, 0], cache[0, 1], cache[1, 0]])
+    scores = torch.einsum("hd,khd->hk", q, keys.repeat_interleave(2, 1)) / 8**0.5
+    expected = scores.softmax(-1)
+    torch.testing.assert_close(actual[:, 0], expected[:, 2])
+    torch.testing.assert_close(actual[:, 2], expected[:, 0])
+    assert actual[:, 1].count_nonzero() == 0
+    assert selected == [0, 3, 4]
+
+
+def test_qsa_chunked_capture_and_early_exit_owner():
+    from vllm.attention_diagnostics import capture_qsa, diagnostics_should_stop
+
+    collector = AttentionDiagnosticsCollector()
+    start(collector, AttentionDiagnosticsParams([5, 1], ["qsa"]))
+    owner = SimpleNamespace(layer_name="qsa")
+    layers = [SimpleNamespace(self_attn=owner), SimpleNamespace()]
+    cache = torch.ones(3, 2, 2, 8)
+    table = torch.tensor([[2, 0, 1]])
+    for offset in [0, 3]:
+        packed = torch.tensor([[0, -1, 1], [0, -1, 1], [0, offset + 2, 2]])
+        with collector.context(batch(offset, 3)):
+            capture_qsa(owner, torch.ones(3, 4, 8), cache, packed, table)
+            assert diagnostics_should_stop(layers, 0)
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm.distributed": SimpleNamespace(
+                get_tp_group=lambda: SimpleNamespace(world_size=1)
+            )
+        },
+    ):
+        result = collector.finish_step(batch(3, 3))["r"]
+    weights = torch.tensor(result["layers"]["qsa"]["weights"])
+    torch.testing.assert_close(weights.sum(-1), torch.ones(4, 2))
+    assert result["layers"]["qsa"]["selected_key_positions"] == [[0, 5], [0]]
+    assert result["early_exit_layer"] == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_qsa_probabilities_reconstruct_kernel_output():
+    """Compare diagnostic weights against the actual paged QSA GPU kernel."""
+    from vllm.attention_diagnostics import sparse_attention_row
+    from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
+
+    torch.manual_seed(8)
+    q = torch.randn(1, 4, 64, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(3, 16, 2, 64, device="cuda", dtype=torch.bfloat16)
+    v = torch.randn_like(k)
+    packed = torch.full((1, 33), -1, device="cuda", dtype=torch.int32)
+    packed[0, :3] = torch.tensor([0, 19, 37], device="cuda")
+    packed[0, -1] = 3
+    table = torch.tensor([[2, 0, 1]], device="cuda", dtype=torch.int32)
+    gate = torch.zeros_like(q)
+    output = qsa_sparse_paged_attention(
+        q,
+        k,
+        v,
+        packed,
+        table,
+        torch.zeros(1, device="cuda", dtype=torch.int32),
+        True,
+        output_gate=gate,
+    )
+    weights, _ = sparse_attention_row(q[0], k, packed[0], table[0], [0, 19, 37])
+    values = torch.stack([v[2, 0], v[0, 3], v[1, 5]]).repeat_interleave(2, 1)
+    expected = torch.einsum("hk,khd->hd", weights, values.float()) * 0.5
+    torch.testing.assert_close(output[0].float(), expected, atol=0.015, rtol=0.015)
