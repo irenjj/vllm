@@ -116,3 +116,66 @@ def test_trace_replay_requires_v2_model_runner():
 
     with pytest.raises(ValueError, match="trace replay requires Model Runner V2"):
         VllmConfig._verify_trace_replay_config(config)
+
+
+@pytest.mark.parametrize(
+    "dp_size,is_moe,ep,rejected",
+    [
+        (1, False, False, False),
+        (4, False, False, False),
+        (4, True, False, True),
+        (1, True, True, False),
+        (4, True, True, True),
+    ],
+)
+def test_diagnostic_dp_accepts_independent_dense_replicas(
+    dp_size, is_moe, ep, rejected
+):
+    from vllm.attention_diagnostics import AttentionDiagnosticsParams
+
+    model = SimpleNamespace(
+        enforce_eager=True,
+        is_moe=is_moe,
+        is_encoder_decoder=False,
+        is_diffusion=False,
+        return_sampling_mask=False,
+    )
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        model_config=model,
+        parallel_config=SimpleNamespace(
+            pipeline_parallel_size=1,
+            decode_context_parallel_size=1,
+            prefill_context_parallel_size=1,
+            enable_expert_parallel=ep,
+            data_parallel_size=dp_size,
+            use_ubatching=False,
+        ),
+        scheduler_config=SimpleNamespace(async_scheduling=False),
+        speculative_config=None,
+        aux_output_config=SimpleNamespace(enabled=False),
+        cache_config=SimpleNamespace(kv_sharing_fast_prefill=False, cache_dtype="auto"),
+        kv_transfer_config=None,
+        ec_transfer_config=None,
+        reasoning_config=None,
+        _check_supports_watermarking=lambda params: False,
+    )
+    processor = SimpleNamespace(
+        vllm_config=config,
+        model_config=model,
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+        diffusion_config=None,
+        resolve_watermarking=lambda params: False,
+        validate_logits_processors_params=lambda params: None,
+    )
+    params = SamplingParams(
+        attention_diagnostics=AttentionDiagnosticsParams([0], ["layer"])
+    )
+    with patch.object(SamplingParams, "verify"):
+        if rejected:
+            with pytest.raises(ValueError, match="no MoE DP"):
+                InputProcessor._validate_params(processor, params, ("generate",))
+        else:
+            InputProcessor._validate_params(processor, params, ("generate",))

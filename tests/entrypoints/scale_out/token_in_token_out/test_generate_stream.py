@@ -1494,3 +1494,95 @@ async def test_stream_text_mode_usage_chunk_echoes_output_mode():
     assert usage_chunk["output_mode"] == "text"
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["completion_tokens"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_attention_diagnostics_has_zero_completion_usage_and_no_stream(stream):
+    from vllm.attention_diagnostics import AttentionDiagnosticsParams
+
+    engine = _mock_engine()
+    payload = {"query_positions": [0, 2], "sequence_length": 3, "layers": {}}
+
+    async def mock_generate(*args, **kwargs):
+        result = _make_request_output(
+            "diagnostic", token_ids=[], finish_reason="stop", finished=True
+        )
+        result.outputs[0].attention_diagnostics = payload
+        yield result
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        model=MODEL_NAME,
+        stream=stream,
+        sampling_params=SamplingParams(
+            attention_diagnostics=AttentionDiagnosticsParams([0, 2], ["layer"])
+        ),
+    )
+    response = await serving.serve_tokens(request)
+    if stream:
+        assert isinstance(response, ErrorResponse)
+        engine.generate.assert_not_called()
+    else:
+        assert isinstance(response, GenerateTokensResponse)
+        assert response.choices[0].token_ids == []
+        assert response.choices[0].attention_diagnostics == payload
+        assert response.usage.completion_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_video_sparse_embedding_mask_survives_render_and_generate():
+    """Video timestamps must not consume entries from the visual encoder cache."""
+    import torch
+
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        PlaceholderRangeInfo,
+    )
+
+    mask = torch.tensor([False, True, True, False, True])
+    placeholders = placeholder_ranges_from_engine_input(
+        {
+            "type": "multimodal",
+            "mm_placeholders": {
+                "video": [PlaceholderRange(offset=1, length=5, is_embed=mask)]
+            },
+        }
+    )
+    serialized = placeholders["video"][0].model_dump_json()
+    restored = PlaceholderRangeInfo.model_validate_json(serialized)
+    assert restored.is_embed == mask.tolist()
+    engine = _mock_engine()
+    captured = []
+
+    async def mock_generate(prompt, *args, **kwargs):
+        captured.append(prompt["mm_placeholders"]["video"][0])
+        yield _make_request_output(
+            "video", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    item = MultiModalKwargsItem(
+        {
+            "pixel_values_videos": MultiModalFieldElem(
+                data=torch.zeros(3, 2), field=MultiModalBatchedField()
+            )
+        }
+    )
+    request = GenerateRequest(
+        model=MODEL_NAME,
+        token_ids=[1, 2, 3, 4, 5, 6],
+        sampling_params=SamplingParams(max_tokens=1),
+        stream=False,
+        features=MultiModalFeatures(
+            mm_hashes={"video": ["video_A"]},
+            mm_placeholders={"video": [restored]},
+            kwargs_data={"video": [encode_mm_kwargs_item(item)]},
+        ),
+    )
+    response = await _build_serving_tokens(engine).serve_tokens(request)
+    assert isinstance(response, GenerateTokensResponse)
+    assert len(captured) == 1
+    assert torch.equal(captured[0].is_embed, mask)
+    assert captured[0].get_num_embeds() == 3

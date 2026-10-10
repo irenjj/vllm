@@ -331,6 +331,19 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.quant_config = quant_config
         self.layer_name = prefix
+        self.diagnostics_scale = scale
+        self.diagnostics_supported = (
+            attn_type == AttentionType.DECODER
+            and alibi_slopes is None
+            and not use_alibi_sqrt
+            and not logits_soft_cap
+            and sliding_window is None
+            and extra_impl_args.get("sinks") is None
+            and kv_sharing_target_layer_name is None
+            and extra_impl_args.get("chunk_lookback", -1) == -1
+            and extra_impl_args.get("dual_chunk_attention_config") is None
+            and kv_cache_dtype == "auto"
+        )
 
         self.num_heads = num_heads
         self.head_size = head_size
@@ -342,6 +355,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
+        self.diagnostics_supported &= not self.use_mm_prefix
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
@@ -504,6 +518,10 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+        if not torch.compiler.is_compiling():
+            from vllm.attention_diagnostics import capture_attention
+
+            capture_attention(self, query, key)
         if output_dtype is None:
             output_dtype = query.dtype
         if self.query_quant is not None:

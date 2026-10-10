@@ -10,6 +10,7 @@ from collections.abc import Sequence as GenericSequence
 from typing import Any
 
 import msgspec
+import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -206,6 +207,10 @@ class ServingTokens(GenerateBaseServing):
                 f"sampling_params.n must be at most the server's max_num_seqs "
                 f"({max_num_seqs}), got {sampling_params.n}."
             )
+        if request.stream and sampling_params.attention_diagnostics is not None:
+            return self.create_error_response(
+                "attention_diagnostics requires stream=false."
+            )
         # The stream schema has no field for the scores.
         if request.stream and sampling_params.prompt_logprob_token_ids is not None:
             return self.create_error_response(
@@ -270,7 +275,14 @@ class ServingTokens(GenerateBaseServing):
             # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
             mm_placeholders: dict[str, list[PlaceholderRange]] = {
                 modality: [
-                    PlaceholderRange(offset=p.offset, length=p.length) for p in ranges
+                    PlaceholderRange(
+                        offset=p.offset,
+                        length=p.length,
+                        is_embed=torch.tensor(p.is_embed, dtype=torch.bool)
+                        if p.is_embed is not None
+                        else None,
+                    )
+                    for p in ranges
                 ]
                 for modality, ranges in features.mm_placeholders.items()
             }
@@ -452,6 +464,7 @@ class ServingTokens(GenerateBaseServing):
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
+                attention_diagnostics=output.attention_diagnostics,
                 sampling_mask=sampling_mask,
             )
             if text_mode:

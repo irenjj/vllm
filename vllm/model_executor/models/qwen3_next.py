@@ -722,6 +722,12 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
+            if not torch.compiler.is_compiling():
+                from vllm.attention_diagnostics import diagnostics_should_stop
+
+                if diagnostics_should_stop(self.layers, layer_idx):
+                    # Replay never consumes final hidden states or samples tokens.
+                    return hidden_states
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
