@@ -148,6 +148,42 @@ class InputProcessor:
         """
         watermarking: bool | None = None
         if isinstance(params, SamplingParams):
+            if params.attention_diagnostics is not None:
+                config = self.vllm_config
+                parallel = config.parallel_config
+                if (
+                    not config.use_v2_model_runner
+                    or not config.model_config.enforce_eager
+                    or config.scheduler_config.async_scheduling
+                    or config.speculative_config is not None
+                    or parallel.pipeline_parallel_size != 1
+                    or parallel.decode_context_parallel_size != 1
+                    or parallel.prefill_context_parallel_size != 1
+                    or (
+                        parallel.enable_expert_parallel
+                        and parallel.data_parallel_size != 1
+                    )
+                    or (parallel.data_parallel_size > 1 and config.model_config.is_moe)
+                    or parallel.use_ubatching
+                    or config.model_config.is_encoder_decoder
+                    or config.model_config.is_diffusion
+                    or config.aux_output_config.enabled
+                    or config.cache_config.kv_sharing_fast_prefill
+                    or config.kv_transfer_config is not None
+                    or config.ec_transfer_config is not None
+                ):
+                    raise ValueError(
+                        "Attention diagnostics require eager MRV2, "
+                        "synchronous scheduling, "
+                        "PP/DCP/PCP=1, no MoE DP, multi-DP EP, "
+                        "microbatching, speculation, "
+                        "encoder-decoder/diffusion models, "
+                        "auxiliary output, fast KV sharing or cache transfer"
+                    )
+                if config.cache_config.cache_dtype != "auto":
+                    raise ValueError(
+                        "Attention diagnostics require unquantized KV cache"
+                    )
             supported_generation_tasks = [
                 task for task in supported_tasks if task in GENERATION_TASKS
             ]
@@ -386,6 +422,12 @@ class InputProcessor:
         session_id: str | None = None,
         kv_hints: KvHintsEnvelope | None = None,
     ) -> EngineCoreRequest:
+        if (
+            resumable
+            and isinstance(params, SamplingParams)
+            and params.attention_diagnostics is not None
+        ):
+            raise ValueError("Attention diagnostics do not support streaming input")
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
 
@@ -454,6 +496,9 @@ class InputProcessor:
             prompt_len = length_from_prompt_token_ids_or_embeds(
                 prompt_token_ids, prompt_embeds
             )
+            if sampling_params.attention_diagnostics is not None:
+                sampling_params.attention_diagnostics.validate(prompt_len)
+                sampling_params.skip_reading_prefix_cache = True
             if not 0 <= sampling_params.routed_experts_prompt_start <= prompt_len:
                 raise VLLMValidationError(
                     f"routed_experts_prompt_start must be between 0 and "

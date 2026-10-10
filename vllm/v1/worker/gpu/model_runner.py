@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.attention_diagnostics import AttentionDiagnosticsCollector
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.compilation.wrapper import compile_model_with_stock_torch
@@ -333,6 +334,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.attention_diagnostics = AttentionDiagnosticsCollector()
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -1714,6 +1716,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
+            self.attention_diagnostics.begin_step(scheduler_output)
             # Update the request states.
             self.update_pp_decode_requests()
             self.finish_requests(scheduler_output)
@@ -2003,19 +2006,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_active_loras=batch_desc.num_active_loras,
             )
 
-            with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
-                num_tokens_across_dp=(
-                    dp_sync.num_tokens_across_dp if dp_sync is not None else None
+            with (
+                self.attention_diagnostics.context(input_batch),
+                set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=input_batch.num_tokens_after_padding,
+                    cudagraph_runtime_mode=batch_desc.cg_mode,
+                    num_tokens_across_dp=(
+                        dp_sync.num_tokens_across_dp if dp_sync is not None else None
+                    ),
+                    batch_descriptor=batch_descriptor,
+                    ubatch_slices=ubatch_slices,
+                    slot_mapping=slot_mappings_by_layer,
+                    skip_compiled=skip_compiled,
+                    is_padding=input_batch.is_padding,
                 ),
-                batch_descriptor=batch_descriptor,
-                ubatch_slices=ubatch_slices,
-                slot_mapping=slot_mappings_by_layer,
-                skip_compiled=skip_compiled,
-                is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(**connector_kwargs)
                 if ubatch_state is not None:
@@ -2113,6 +2119,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
         self.execute_model_state = None
+
+        if input_batch.req_ids and all(
+            req_id in self.attention_diagnostics.requests
+            for req_id in input_batch.req_ids
+        ):
+            diagnostics = self.attention_diagnostics.finish_step(input_batch)
+            self.postprocess_num_computed_tokens(input_batch)
+            self.model_state.postprocess_state(
+                input_batch.idx_mapping, 0, self.req_states.num_computed_tokens.gpu
+            )
+            return ModelRunnerOutput(
+                req_ids=input_batch.req_ids,
+                req_id_to_index={r: i for i, r in enumerate(input_batch.req_ids)},
+                sampled_token_ids=[[] for _ in input_batch.req_ids],
+                attention_diagnostics=diagnostics,
+                kv_connector_output=self.kv_connector.post_forward(finished_req_ids),
+                ec_connector_output=ec_connector_output,
+            )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -2350,6 +2374,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.aux_output_connector.close()
         set_offloader(None)
         self.cudagraph_manager = None
+        self.attention_diagnostics.requests.clear()
         self.fast_prefill = None
         self.pooling_runner = None
         if hasattr(self, "kv_caches"):

@@ -9,6 +9,7 @@ from pydantic import (
     Field,
     NonNegativeInt,
     PrivateAttr,
+    StrictBool,
     Tag,
     field_validator,
     model_validator,
@@ -49,9 +50,16 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[StrictBool] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """Positions occupied by visual embeddings, excluding interleaved text."""
+
+    @model_validator(mode="after")
+    def validate_embed_mask(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must have exactly length entries")
+        return self
 
 
 def _has_serialized_mm_items(
@@ -395,6 +403,8 @@ class GenerateLogProbs(BaseModel):
 
 class GenerateChoiceBase(BaseModel):
     """Fields shared by every `output_mode` of a non-streaming choice."""
+
+    attention_diagnostics: dict[str, Any] | None = None
 
     index: int
     # per OpenAI spec this is the default

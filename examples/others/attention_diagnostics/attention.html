@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Token Attention</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      background: #0d1422;
+      color: #e9eef8;
+      font: 15px system-ui;
+    }
+    main {
+      max-width: 1450px;
+      margin: auto;
+      padding: 28px;
+    }
+    .layout {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: 20px;
+    }
+    section {
+      background: #151f31;
+      border: 1px solid #34445b;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    button,
+    select,
+    input {
+      background: #23344c;
+      color: inherit;
+      border: 1px solid #56708d;
+      border-radius: 6px;
+      padding: 8px;
+    }
+    button {
+      cursor: pointer;
+    }
+    .token {
+      margin: 3px;
+      white-space: pre-wrap;
+      padding: 5px;
+    }
+    .token.active {
+      background: #267987;
+    }
+    .tokens {
+      max-height: 250px;
+      overflow: auto;
+    }
+    label {
+      display: inline-block;
+      margin: 8px;
+    }
+    #status {
+      white-space: pre-wrap;
+      margin: 15px 0;
+    }
+    .muted {
+      color: #a7b7cd;
+    }
+    #playbox {
+      position: relative;
+      background: black;
+    }
+    video {
+      width: 100%;
+      display: block;
+    }
+    canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    #textmap span {
+      display: inline-block;
+      border-radius: 4px;
+      margin: 2px;
+      padding: 4px;
+    }
+    #textmap {
+      max-height: 250px;
+      overflow: auto;
+    }
+    #update {
+      width: 100%;
+      margin-top: 12px;
+    }
+    #seek {
+      width: 65%;
+    }
+    @media (max-width: 850px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+    }
+    a {
+      color: #80ddd4;
+    }
+  </style>
+  <main>
+    <h1>Token attention：文字与视频</h1>
+    <p class="muted">
+      选择输入或回答中的 token，观察它看向哪些文字和视频区域。Attention
+      不是因果解释，回放不是原推理录像。
+    </p>
+    <div class="layout">
+      <section>
+        <h2>输入</h2>
+        <div id="prompt" class="tokens"></div>
+        <h2>回答</h2>
+        <div id="answer" class="tokens"></div>
+        <label><input id="special" type="checkbox" />显示模板和视觉 token</label
+        ><button id="update">回放所选 token</button>
+        <div id="status" role="status"></div>
+        <p class="muted">
+          多选时平均所选 attention 行；最多选择 128
+          个位置。已经采集的组合在本页内存中复用。
+        </p>
+      </section>
+      <section>
+        <label
+          >层
+          <select id="layer"></select></label
+        ><label
+          >头
+          <select id="head"></select></label
+        ><label
+          >叠加透明度
+          <input
+            id="opacity"
+            type="range"
+            min="0"
+            max="0.9"
+            step="0.05"
+            value="0.7"
+        /></label>
+        <div id="playbox">
+          <video id="video" src="video.mp4" muted playsinline></video
+          ><canvas id="heat"></canvas>
+        </div>
+        <p>
+          <button id="play">播放 / 暂停</button
+          ><input
+            id="seek"
+            type="range"
+            min="0"
+            max="2"
+            step="0.01"
+            value="0"
+          /><span id="time"></span>
+        </p>
+        <div id="stats"></div>
+        <h2>文字 attention</h2>
+        <div id="textmap"></div>
+        <p class="muted">
+          视频按最近采样时间组显示；未对中间帧重新推理。视频全程共用颜色尺度，文字独立缩放。占比仍按全部合法
+          key 归一化。位置 i 展示处理 token i 时的
+          attention，不自动偏移到预测它的位置。
+        </p>
+      </section>
+    </div>
+  </main>
+  <script src="attention.js"></script>
+</html>
