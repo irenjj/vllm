@@ -196,3 +196,11 @@ Early exit stops after the deepest requested block and avoids prefetching the
 next block's N-gram embeddings. Ordinary generation retains the full decoder.
 MoE expert routing, GDN state, residual gates and N-gram lookup visualization
 are not included. MoE DP across independent engines remains unsupported.
+
+## Local video viewer
+
+For a runnable video example, including snapshot preparation, token selection,
+head averaging, text heatmaps, and a video overlay, see
+[the attention demo](../../examples/others/attention_diagnostics/README.md).
+The viewer caches previously collected selections in browser memory; a new
+selection replays the saved processed input.
