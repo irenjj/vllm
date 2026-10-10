@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="zh">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  />
+  <title>MoE 路由诊断</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      background: #0d1422;
+      color: #e9eef8;
+      font: 15px system-ui;
+      margin: 0;
+    }
+    main {
+      max-width: 1400px;
+      margin: auto;
+      padding: 28px;
+    }
+    section {
+      padding: 20px;
+      background: #151f31;
+      border: 1px solid #34445b;
+      border-radius: 12px;
+      margin: 18px 0;
+    }
+    button,
+    input,
+    select {
+      background: #23344c;
+      color: inherit;
+      border: 1px solid #56708d;
+      border-radius: 6px;
+      padding: 9px;
+    }
+    button {
+      cursor: pointer;
+    }
+    label {
+      display: inline-block;
+      margin: 8px;
+    }
+    .muted {
+      color: #a7b7cd;
+    }
+    a {
+      color: #80ddd4;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+    }
+    td,
+    th {
+      padding: 9px;
+      text-align: left;
+      border-bottom: 1px solid #34445b;
+    }
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+      gap: 5px;
+    }
+    #grid button {
+      height: 55px;
+      font-size: 12px;
+    }
+    #status {
+      white-space: pre-wrap;
+    }
+    #details {
+      overflow: auto;
+      max-height: 400px;
+    }
+    .bar {
+      height: 9px;
+      background: #53c2b3;
+      margin-top: 4px;
+    }
+    h1 {
+      margin-bottom: 8px;
+    }
+    #overview {
+      max-height: 280px;
+      overflow: auto;
+    }
+    #grid {
+      max-height: 460px;
+      overflow: auto;
+    }
+  </style>
+  <main>
+    <a href="attention.html">← Attention 视频视图</a>
+    <h1>MoE 专家路由</h1>
+    <p class="muted">
+      观察 token 实际选中的专家和路由权重。专家按 layer 区分；路由权重不是
+      attention，也不代表因果贡献。共享专家不计入。
+    </p>
+    <section>
+      <h2>采集当前示例任务</h2>
+      <label
+        >模型版本 <input id="model" placeholder="填入权重版本/哈希" required
+      /></label>
+      <label>任务名称 <input id="task" value="当前视频任务" /></label>
+      <label
+        >Token 范围
+        <select id="scope">
+          <option value="all">完整输入和回答（含视觉 token）</option>
+          <option value="prompt">仅输入</option>
+          <option value="output">仅回答</option>
+          <option value="custom">指定绝对位置</option>
+        </select></label
+      >
+      <label
+        >位置 <input id="positions" placeholder="例如 389,425,444"
+      /></label>
+      <label
+        >层 <input id="layers" value="0-47" placeholder="0-47 或 3,7,19"
+      /></label>
+      <button id="run">回放并加入任务组</button>
+      <p class="muted">
+        每次最多 128 个
+        token；较长输入会分批完整回放。只有整组采集成功才加入统计。当前页面使用测试服务的固定视频输入。
+      </p>
+      <div id="status" role="status">
+        尚未采集 MoE 数据。可回放，或导入其他任务导出的诊断 JSON。
+      </div>
+    </section>
+    <section>
+      <h2>任务组</h2>
+      <button id="sample">载入本次实测任务组</button
+      ><label
+        >导入诊断 JSON（可多选）
+        <input type="file" id="import" multiple accept=".json" /></label
+      ><button id="export">导出任务组</button><button id="clear">清空</button>
+      <div id="tasks"></div>
+      <p class="muted">
+        支持不同任务的结果比较；任务必须来自同一模型版本。再次导入同一任务 ID
+        会替换，避免重复计数。数据留在本页内存中，刷新前请导出。
+      </p>
+    </section>
+    <section>
+      <h2>专家使用分布</h2>
+      <label
+        >任务
+        <select id="taskFilter">
+          <option value="">整个任务组</option>
+        </select></label
+      ><label
+        >层
+        <select id="layer"></select></label
+      ><label
+        >指标
+        <select id="metric">
+          <option value="count">选中次数</option>
+          <option value="weight">路由权重之和</option>
+        </select></label
+      >
+      <h3>各层概览（点击进入明细）</h3>
+      <div id="overview"></div>
+      <div id="summary"></div>
+      <p class="muted">
+        颜色在当前层内缩放。点击专家查看哪些 token
+        选择了它；未采集的层不作为零计数。
+      </p>
+      <div id="grid"></div>
+      <div id="details"></div>
+    </section>
+  </main>
+  <script src="moe.js"></script>
+</html>

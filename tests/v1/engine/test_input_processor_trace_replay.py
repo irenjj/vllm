@@ -128,8 +128,9 @@ def test_trace_replay_requires_v2_model_runner():
         (4, True, True, True),
     ],
 )
+@pytest.mark.parametrize("capture_kind", ["attention", "moe"])
 def test_diagnostic_dp_accepts_independent_dense_replicas(
-    dp_size, is_moe, ep, rejected
+    dp_size, is_moe, ep, rejected, capture_kind
 ):
     from vllm.attention_diagnostics import AttentionDiagnosticsParams
 
@@ -148,6 +149,8 @@ def test_diagnostic_dp_accepts_independent_dense_replicas(
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
             enable_expert_parallel=ep,
+            enable_eplb=False,
+            use_sequence_parallel_moe=False,
             data_parallel_size=dp_size,
             use_ubatching=False,
         ),
@@ -171,7 +174,9 @@ def test_diagnostic_dp_accepts_independent_dense_replicas(
         validate_logits_processors_params=lambda params: None,
     )
     params = SamplingParams(
-        attention_diagnostics=AttentionDiagnosticsParams([0], ["layer"])
+        attention_diagnostics=AttentionDiagnosticsParams(
+            [0], ["layer"], capture_kind=capture_kind
+        )
     )
     with patch.object(SamplingParams, "verify"):
         if rejected:

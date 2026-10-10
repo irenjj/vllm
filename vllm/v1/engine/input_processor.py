@@ -180,6 +180,12 @@ class InputProcessor:
                         "encoder-decoder/diffusion models, "
                         "auxiliary output, fast KV sharing or cache transfer"
                     )
+                if params.attention_diagnostics.capture_kind == "moe" and (
+                    parallel.enable_eplb or parallel.use_sequence_parallel_moe
+                ):
+                    raise ValueError(
+                        "MoE diagnostics do not support EPLB or sequence parallelism"
+                    )
                 if config.cache_config.cache_dtype != "auto":
                     raise ValueError(
                         "Attention diagnostics require unquantized KV cache"

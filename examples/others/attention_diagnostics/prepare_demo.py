@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--tokenizer", required=True)
     parser.add_argument("--model-revision", required=True)
     parser.add_argument("--layers", nargs="+", required=True)
+    parser.add_argument("--moe-layers", nargs="+", default=[])
     parser.add_argument("--endpoint", default="http://127.0.0.1:8000")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--spatial-merge-size", type=int, default=2)
@@ -133,6 +134,7 @@ def main():
             {
                 "model_revision": args.model_revision,
                 "layer_names": args.layers,
+                "moe_layer_names": args.moe_layers,
                 "prompt_length": prompt_length,
                 "tokens": tokens,
                 "grid": grid,
@@ -144,6 +146,9 @@ def main():
         )
     )
     shutil.copyfile(args.video, args.output / "video.mp4")
+    if args.moe_layers:
+        for name in ("moe.html", "moe.js"):
+            shutil.copyfile(Path(__file__).with_name(name), args.output / name)
     for name in ("attention.html", "attention.js"):
         shutil.copyfile(Path(__file__).with_name(name), args.output / name)
     print(
