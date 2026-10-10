@@ -35,3 +35,20 @@ sampled time group; it does not invent attention for unsampled frames.
 Generated `replay.json`, `data.json`, and `video.mp4` belong in an output directory,
 not Git. They contain the original inputs/outputs and media. Retain them only
 where that data is authorized. In-browser result caching is temporary.
+
+## MoE routing task groups
+
+For a supported MoE model, add `--moe-layers` with the exact MoE runner names to
+`prepare_demo.py` (for example `language_model.model.layers.0.mlp.experts`).
+This copies `moe.html` and `moe.js` and records the allowed layer names in
+`data.json`. Use the same server and open `/moe.html`. The layer selection is
+an index into that configured list; hover the field to see the mapping.
+
+Collect the current snapshot, select a layer, and click an expert to inspect
+its token rows. The overview counts the actual routed expert IDs separately
+for each layer. It excludes separate shared experts and does not infer expert
+semantics. Use `collect_moe.py` and the manifest format in the feature guide
+to collect other snapshots, then import their task-group JSON. Imports must
+use the same model revision; repeated task IDs replace existing entries.
+Export the group before refreshing. The page can also inspect imports without
+a running model. Data with token labels may contain input and output text.

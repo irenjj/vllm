@@ -21,8 +21,15 @@ class AttentionDiagnosticsParams:
     max_buffer_bytes: int = 256 * 1024 * 1024
     max_output_values: int = 1_000_000
     early_exit: bool = True
+    capture_kind: str = "attention"
 
     def validate(self, prompt_length: int | None = None) -> None:
+        if self.capture_kind not in ("attention", "moe"):
+            raise ValueError("capture_kind must be attention or moe")
+        if self.capture_kind == "moe" and (
+            self.key_positions is not None or self.head_indices is not None
+        ):
+            raise ValueError("MoE routing has no key_positions or head_indices")
         if type(self.early_exit) is not bool:
             raise ValueError("early_exit must be a boolean")
         for name in ("query_positions", "key_positions", "head_indices"):
@@ -45,8 +52,10 @@ class AttentionDiagnosticsParams:
             or any(not isinstance(n, str) or not n for n in self.layer_names)
         ):
             raise ValueError("layer_names must contain unique, non-empty module names")
-        if len(self.query_positions) > 128 or len(self.layer_names) > 8:
-            raise ValueError("At most 128 query positions and 8 layers are supported")
+        if len(self.query_positions) > 128 or len(self.layer_names) > (
+            128 if self.capture_kind == "moe" else 8
+        ):
+            raise ValueError("At most 128 queries, 8 attention or 128 MoE layers")
         if (
             type(self.max_buffer_bytes) is not int
             or not 0 < self.max_buffer_bytes <= 1024**3
@@ -159,10 +168,28 @@ def capture_qsa(layer, query, key_cache, packed, block_table):
 
 
 @dataclass
+class _MoECapture:
+    expert_ids: torch.Tensor
+    routing_weights: torch.Tensor
+    queries_seen: torch.Tensor
+    num_experts: int
+
+
+def capture_moe(layer, expert_ids=None, routing_weights=None, num_experts=0):
+    """Observe actual modular routing before dispatch, without rerouting."""
+    active = _active_capture.get()
+    if active is not None:
+        collector, batch = active
+        collector.capture_moe(layer, expert_ids, routing_weights, num_experts, batch)
+
+
+@dataclass
 class _RequestCapture:
     params: AttentionDiagnosticsParams
     length: int
-    layers: dict[str, _LayerCapture | _SparseCapture] = field(default_factory=dict)
+    layers: dict[str, _LayerCapture | _SparseCapture | _MoECapture] = field(
+        default_factory=dict
+    )
     error: str | None = None
     buffer_bytes: int = 0
     early_exit_layer: int | None = None
@@ -193,9 +220,14 @@ def diagnostics_should_stop(layers: Any, layer_index: int) -> bool:
     if not states or any(s is None or not s.params.early_exit for s in states):
         return False
     names = {}
+    kinds = {s.params.capture_kind for s in states}
+    if len(kinds) != 1:
+        return False
     for index, block in enumerate(layers):
         owner = getattr(block, "self_attn", None)
         attention = getattr(owner, "attn", owner)
+        if "moe" in kinds:
+            attention = getattr(getattr(block, "mlp", None), "experts", None)
         if attention is not None and hasattr(attention, "layer_name"):
             names[attention.layer_name] = index
     requested = {name for s in states for name in s.params.layer_names}
@@ -241,6 +273,7 @@ class AttentionDiagnosticsCollector:
             if (
                 state is None
                 or state.error
+                or state.params.capture_kind != "attention"
                 or layer.layer_name not in state.params.layer_names
             ):
                 continue
@@ -256,6 +289,7 @@ class AttentionDiagnosticsCollector:
             if (
                 state is None
                 or state.error
+                or state.params.capture_kind != "attention"
                 or layer.layer_name not in state.params.layer_names
             ):
                 continue
@@ -304,6 +338,97 @@ class AttentionDiagnosticsCollector:
             except (ValueError, RuntimeError, MemoryError) as exc:
                 state.error = str(exc)
                 state.layers.clear()
+
+    def capture_moe(self, layer, ids, weights, num_experts, batch):
+        for i, req_id in enumerate(batch.req_ids):
+            state = self.requests.get(req_id)
+            if (
+                state is None
+                or state.error
+                or state.params.capture_kind != "moe"
+                or layer.layer_name not in state.params.layer_names
+            ):
+                continue
+            try:
+                if ids is None or weights is None:
+                    raise ValueError("MoE routing capture requires a modular kernel")
+                if layer.router.eplb_state is not None:
+                    raise ValueError("MoE routing capture does not support EPLB")
+                if (
+                    ids.ndim != 2
+                    or weights.shape != ids.shape
+                    or ids.shape[0] < int(batch.query_start_loc_np[-1])
+                ):
+                    raise ValueError(
+                        "MoE routing token layout differs from replay batch"
+                    )
+                if not torch.isfinite(weights).all() or (weights < 0).any():
+                    raise ValueError("Invalid MoE routing weights")
+                if (ids < 0).any() or (ids >= num_experts).any():
+                    raise ValueError(
+                        "Invalid routed expert IDs; fused shared slots unsupported"
+                    )
+                params = state.params
+                entry = state.layers.get(layer.layer_name)
+                if entry is None:
+                    shape = (len(params.query_positions), ids.shape[1])
+                    size = shape[0] * shape[1] * 12 + shape[0]
+                    if state.buffer_bytes + size > params.max_buffer_bytes:
+                        raise ValueError("MoE capture exceeds max_buffer_bytes")
+                    entry = _MoECapture(
+                        torch.empty(shape, dtype=torch.int64),
+                        torch.empty(shape),
+                        torch.zeros(shape[0], dtype=torch.bool),
+                        num_experts,
+                    )
+                    state.layers[layer.layer_name] = entry
+                    state.buffer_bytes += size
+                if not isinstance(entry, _MoECapture):
+                    raise ValueError("MoE capture type changed during replay")
+                start, end = (int(x) for x in batch.query_start_loc_np[i : i + 2])
+                offset = int(batch.num_computed_tokens_np[i])
+                for j, pos in enumerate(params.query_positions):
+                    if offset <= pos < offset + end - start:
+                        row = start + pos - offset
+                        entry.expert_ids[j] = ids[row].detach().cpu()
+                        entry.routing_weights[j] = weights[row].detach().float().cpu()
+                        entry.queries_seen[j] = True
+            except (ValueError, RuntimeError, MemoryError) as exc:
+                state.error = str(exc)
+                state.layers.clear()
+
+    def _finish_moe(self, state, group):
+        import hashlib
+
+        result = {
+            "capture_kind": "moe",
+            "query_positions": state.params.query_positions,
+            "sequence_length": state.length,
+            "early_exit_layer": state.early_exit_layer,
+            "layers": {},
+        }
+        for name in state.params.layer_names:
+            entry = state.layers[name]
+            assert isinstance(entry, _MoECapture)
+            result["layers"][name] = {
+                "expert_ids": entry.expert_ids.tolist(),
+                "routing_weights": entry.routing_weights.tolist(),
+                "num_experts": entry.num_experts,
+                "weight_stage": "router_output_before_expert_dispatch",
+                "expert_id_space": "logical",
+                "shared_experts": "not_captured",
+            }
+        # These are replicated routes, not TP head shards. Never concatenate or
+        # sum them across ranks; reject differing layouts/routes explicitly.
+        if group.world_size > 1:
+            digest = hashlib.sha256(repr(result).encode()).hexdigest()
+            digests = [None] * group.world_size
+            torch.distributed.all_gather_object(digests, digest, group=group.cpu_group)
+            if len(set(digests)) != 1:
+                return {
+                    "error": "MoE routes differ across TP ranks; unsupported layout"
+                }
+        return result
 
     def _capture_layer(self, state, layer, q, k, batch, i):
         if not layer.diagnostics_supported or k is None:
@@ -377,12 +502,22 @@ class AttentionDiagnosticsCollector:
                 ):
                     error = f"Incomplete attention capture for {name}"
                     break
+        if not error and state.params.capture_kind == "moe":
+            total = sum(
+                e.expert_ids.numel() * 2
+                for e in state.layers.values()
+                if isinstance(e, _MoECapture)
+            )
+            if total > state.params.max_output_values:
+                error = "MoE output exceeds max_output_values"
         if group.world_size > 1:
             torch.distributed.all_gather_object(errors, error, group=group.cpu_group)
         else:
             errors[0] = error
         if any(errors):
             return {"error": next(e for e in errors if e)}
+        if state.params.capture_kind == "moe":
+            return self._finish_moe(state, group)
         params = state.params
         keys = (
             params.key_positions
@@ -399,6 +534,7 @@ class AttentionDiagnosticsCollector:
         total_values = 0
         for name in params.layer_names:
             entry = state.layers[name]
+            assert isinstance(entry, (_LayerCapture, _SparseCapture))
             num_heads = (
                 entry.weights.shape[0]
                 if isinstance(entry, _SparseCapture)

@@ -88,14 +88,29 @@ def main():
                     or len(set(positions)) != len(positions)
                 ):
                     raise ValueError("Invalid token positions")
-                name = selection["layer_name"]
-                if name not in data["layer_names"]:
-                    raise ValueError("Unknown attention layer")
+                kind = selection.get("kind", "attention")
+                if kind == "moe":
+                    names = selection["layer_names"]
+                    allowed = data.get("moe_layer_names", [])
+                    if (
+                        not isinstance(names, list)
+                        or not 0 < len(names) <= 128
+                        or any(n not in allowed for n in names)
+                        or len(set(names)) != len(names)
+                    ):
+                        raise ValueError("Unknown MoE layers")
+                elif kind == "attention":
+                    names = [selection["layer_name"]]
+                    if names[0] not in data["layer_names"]:
+                        raise ValueError("Unknown attention layer")
+                else:
+                    raise ValueError("Unknown diagnostic kind")
                 payload = json.loads((root / "replay.json").read_text())
                 payload["sampling_params"] = {
                     "attention_diagnostics": {
                         "query_positions": positions,
-                        "layer_names": [name],
+                        "layer_names": names,
+                        "capture_kind": kind,
                     }
                 }
                 response = httpx.post(

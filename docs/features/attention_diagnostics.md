@@ -204,3 +204,67 @@ head averaging, text heatmaps, and a video overlay, see
 [the attention demo](../../examples/others/attention_diagnostics/README.md).
 The viewer caches previously collected selections in browser memory; a new
 selection replays the saved processed input.
+
+## MoE expert routing replay
+
+Set `capture_kind="moe"` in the same diagnostic parameters. Use exact MoE
+runner names (for Flash-Next, `language_model.model.layers.0.mlp.experts`,
+through layer 47), not attention names. `query_positions` retain the same
+absolute sequence meaning. `head_indices` and `key_positions` are invalid.
+Up to 128 MoE layers and 128 query positions can be requested per replay.
+
+The modular MoE runner captures the actual `topk_ids` and `topk_weights`
+immediately after routing and before expert dispatch. It does not recompute
+router softmax or infer expert selection from attention. Each layer returns
+`expert_ids` and `routing_weights`, both shaped `[queries, top_k]`, together
+with `num_experts` and `expert_id_space="logical"`. These are dispatch weights,
+not normalized attention probabilities or final expert-output contributions.
+Separate shared experts are not captured. Monolithic kernels, fused shared
+slots, EPLB, and sequence-parallel MoE are unsupported and fail explicitly.
+
+TP routes are replicated rather than head-sharded: each rank validates capture
+and all ranks compare result digests. Matching results are returned once, not
+concatenated or counted multiple times. Divergent routes/layouts fail closed.
+MoE replay inherits existing eager MRV2, DP/EP, scheduler and cache restrictions.
+Early exit resolves the deepest selected MoE block, including blocks with GDN
+attention. Selecting all layers executes the complete decoder.
+
+`examples/others/attention_diagnostics/moe.html` is a standalone inspection
+page. Import exported task groups to compare expert selection counts and weight
+sums, select a layer/task, and click an expert to inspect token rows. Counts
+cover only captured tokens. Expert IDs must never be merged across layers.
+The preview replay controls require the demo's `/api/replay` bridge and
+`data.json`; imported task groups work without a model backend. Model revisions
+in task files are caller-provided provenance and must be verified by the caller.
+
+For a group of saved inference snapshots, use `collect_moe.py` with a manifest:
+
+```json
+{
+  "layer_names": ["language_model.model.layers.0.mlp.experts"],
+  "tasks": [{
+    "id": "clip-001-run-1",
+    "name": "Clip 001",
+    "model": "same-model-and-weight-revision",
+    "replay_file": "clip-001-replay.json",
+    "query_positions": [10, 20]
+  }]
+}
+```
+
+Each replay file is the original token-in/token-out payload including retained
+multimodal features and actual prompt plus output IDs. Optional `tokens_file`
+contains a list of `{ "position": 0, "text": "..." }` labels. Omitting
+`query_positions` captures the whole sequence in batches of 128 queries. Each
+batch runs a separate prefill; these are replay observations, not a recording
+of the original inference. Longer requests cost multiple full forwards.
+
+```bash
+uv run --no-project .venv/bin/python \
+  examples/others/attention_diagnostics/collect_moe.py tasks.json \
+  --endpoint http://localhost:8000 --output moe-task-group.json
+```
+
+Use `VLLM_API_KEY` for authentication. The export excludes replay features and
+credentials, but optional token labels can contain input/output text. Import the
+result into `moe.html`. Browser state is temporary; export before refreshing.

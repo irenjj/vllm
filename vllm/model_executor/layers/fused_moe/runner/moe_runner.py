@@ -614,7 +614,10 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        from vllm.attention_diagnostics import capture_moe
+
         if self.routed_experts.quant_method.is_monolithic:
+            capture_moe(self)
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
@@ -628,6 +631,10 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
+            )
+
+            capture_moe(
+                self, topk_ids, topk_weights, self.moe_config.num_logical_experts
             )
 
             fused_out = self.routed_experts.forward_modular(

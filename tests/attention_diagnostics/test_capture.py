@@ -364,3 +364,131 @@ def test_qsa_probabilities_reconstruct_kernel_output():
     values = torch.stack([v[2, 0], v[0, 3], v[1, 5]]).repeat_interleave(2, 1)
     expected = torch.einsum("hk,khd->hd", weights, values.float()) * 0.5
     torch.testing.assert_close(output[0].float(), expected, atol=0.015, rtol=0.015)
+
+
+def test_moe_routes_keep_chunk_positions_and_are_not_attention_heads():
+    """Preserve actual routing IDs/weights and query order across chunks."""
+    from vllm.attention_diagnostics import capture_moe
+
+    params = AttentionDiagnosticsParams([5, 1], ["moe"], capture_kind="moe")
+    collector = AttentionDiagnosticsCollector()
+    start(collector, params)
+    module = SimpleNamespace(layer_name="moe", router=SimpleNamespace(eplb_state=None))
+    ids = torch.tensor([[0, 2], [2, 1], [3, 0], [1, 3], [2, 3], [0, 1]])
+    weights = torch.tensor([[0.8, 0.2]]).repeat(6, 1)
+    for offset in (0, 3):
+        with collector.context(batch(offset, 3)):
+            capture_moe(
+                module, ids[offset : offset + 3], weights[offset : offset + 3], 4
+            )
+        if offset == 0:
+            assert collector.finish_step(batch(offset, 3)) == {}
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm.distributed": SimpleNamespace(
+                get_tp_group=lambda: SimpleNamespace(world_size=1)
+            )
+        },
+    ):
+        result = collector.finish_step(batch(3, 3))["r"]
+    assert result["capture_kind"] == "moe"
+    assert result["query_positions"] == [5, 1]
+    assert result["layers"]["moe"]["expert_ids"] == [[0, 1], [2, 1]]
+    torch.testing.assert_close(
+        torch.tensor(result["layers"]["moe"]["routing_weights"]), weights[[5, 1]]
+    )
+    assert collector.requests == {}
+
+
+@pytest.mark.parametrize(
+    "failure", ["monolithic", "layout", "expert_id", "nan", "budget"]
+)
+def test_moe_capture_fails_closed(failure):
+    from vllm.attention_diagnostics import capture_moe
+
+    params = AttentionDiagnosticsParams(
+        [0],
+        ["moe"],
+        capture_kind="moe",
+        max_buffer_bytes=1 if failure == "budget" else 1024,
+    )
+    collector = AttentionDiagnosticsCollector()
+    start(collector, params, length=2)
+    module = SimpleNamespace(layer_name="moe", router=SimpleNamespace(eplb_state=None))
+    ids, weights = torch.tensor([[0], [1]]), torch.ones(2, 1)
+    if failure == "layout":
+        ids, weights = ids[:1], weights[:1]
+    if failure == "expert_id":
+        ids[0, 0] = 99
+    if failure == "nan":
+        weights[0, 0] = float("nan")
+    with collector.context(batch(0, 2)):
+        capture_moe(module, None if failure == "monolithic" else ids, weights, 2)
+    with patch.dict(
+        "sys.modules",
+        {
+            "vllm.distributed": SimpleNamespace(
+                get_tp_group=lambda: SimpleNamespace(world_size=1)
+            )
+        },
+    ):
+        assert "error" in collector.finish_step(batch(0, 2))["r"]
+
+
+def test_moe_early_exit_resolves_mlp_instead_of_attention():
+    from vllm.attention_diagnostics import diagnostics_should_stop
+
+    collector = AttentionDiagnosticsCollector()
+    start(collector, AttentionDiagnosticsParams([0], ["moe1"], capture_kind="moe"))
+    layers = [
+        SimpleNamespace(
+            mlp=SimpleNamespace(experts=SimpleNamespace(layer_name=f"moe{i}"))
+        )
+        for i in range(3)
+    ]
+    with collector.context(batch(0, 6)):
+        assert not diagnostics_should_stop(layers, 0)
+        assert diagnostics_should_stop(layers, 1)
+
+
+def test_moe_rejects_attention_selectors_and_accepts_all_model_layers():
+    AttentionDiagnosticsParams(
+        [0], [f"moe{i}" for i in range(48)], capture_kind="moe"
+    ).validate(1)
+    with pytest.raises(ValueError, match="no key_positions"):
+        AttentionDiagnosticsParams(
+            [0], ["moe"], capture_kind="moe", head_indices=[0]
+        ).validate(1)
+
+
+@pytest.mark.parametrize("divergent", [False, True])
+def test_moe_tp_routes_are_validated_without_duplicate_counts(divergent):
+    from vllm.attention_diagnostics import capture_moe
+
+    collector = AttentionDiagnosticsCollector()
+    start(
+        collector,
+        AttentionDiagnosticsParams([0], ["moe"], capture_kind="moe"),
+        length=1,
+    )
+    module = SimpleNamespace(layer_name="moe", router=SimpleNamespace(eplb_state=None))
+    with collector.context(batch(0, 1)):
+        capture_moe(module, torch.tensor([[3, 1]]), torch.tensor([[0.7, 0.3]]), 4)
+
+    def gather(output, value, group):
+        output[:] = [value, "different" if divergent and value is not None else value]
+
+    group = SimpleNamespace(world_size=2, cpu_group="cpu")
+    with (
+        patch.dict(
+            "sys.modules",
+            {"vllm.distributed": SimpleNamespace(get_tp_group=lambda: group)},
+        ),
+        patch("torch.distributed.all_gather_object", side_effect=gather),
+    ):
+        result = collector.finish_step(batch(0, 1))["r"]
+    if divergent:
+        assert "routes differ" in result["error"]
+    else:
+        assert result["layers"]["moe"]["expert_ids"] == [[3, 1]]
